@@ -53,6 +53,27 @@ Crear un archivo `.env.local` (desarrollo) o configurarlas en el dashboard de Ve
 3. Definir el tema (ej. "Psicología").
 4. Opcionalmente, forzar la generación de preguntas.
 
+### Uploads del panel admin
+
+Los archivos del panel `/upload` se suben con **client uploads** de Vercel Blob (`@vercel/blob/client`). Esto evita que los PDFs pasen por una función serverless de Next.js/Vercel.
+
+El motivo es el límite de **4.5 MB por request** de Vercel Functions: si se enviaran 20 o 25 PDFs juntos a una API route, el request superaría ese límite y devolvería `413 Content Too Large`.
+
+El flujo actual es:
+
+1. El admin inicia sesión con `ADMIN_PASSWORD`; el backend setea una cookie httpOnly de sesión admin.
+2. Cada PDF o imagen solicita un token temporal a `/api/upload/token`.
+3. El navegador sube cada archivo directamente a Vercel Blob con `upload()`.
+4. Cuando las subidas terminan, el frontend manda solo las URLs resultantes a `/api/upload`, que guarda la configuración en KV.
+
+Restricciones actuales:
+
+- PDFs: `application/pdf`
+- Imagen de ejemplo: `image/png` o `image/jpeg`
+- Tamaño máximo: 20 MB por archivo
+
+Si un archivo individual falla por tipo, tamaño, token expirado u otro error, el panel muestra el error de ese archivo y continúa con los demás.
+
 ### Jugador
 
 1. Entra a `/` → se le asigna un `user_id` anónimo vía cookie httpOnly.
@@ -109,7 +130,9 @@ app/
     check-answer/route.ts           # POST verificar respuesta
     complete-game/route.ts          # POST marcar partida gratis usada
     generate-questions/route.ts     # POST forzar regeneración (admin)
-    upload/route.ts                 # POST/GET subir PDFs (admin)
+    upload/route.ts                 # POST/GET guardar URLs subidas (admin)
+    upload/session/route.ts         # POST sesión admin httpOnly
+    upload/token/route.ts           # POST token temporal para Blob client upload
     create-payment-preference/route.ts
     webhooks/mercadopago/route.ts
     user-status/route.ts

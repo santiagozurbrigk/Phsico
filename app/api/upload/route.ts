@@ -1,66 +1,61 @@
 import { NextRequest, NextResponse } from "next/server";
-import { put } from "@vercel/blob";
 import { getConfig, saveConfig } from "@/lib/store";
+import { isAdminRequest } from "@/lib/admin";
 
 export const dynamic = "force-dynamic";
 
+type UploadedPdf = {
+  name: string;
+  url: string;
+};
+
 /**
  * POST /api/upload
- * Panel admin: sube PDFs + imagen de ejemplo a Vercel Blob.
- * Protegido con ADMIN_PASSWORD.
+ * Guarda en KV las URLs ya subidas a Vercel Blob desde el cliente.
+ * Protegido con sesión admin httpOnly.
  */
 export async function POST(request: NextRequest) {
-  const formData = await request.formData();
-  const password = formData.get("password") as string;
-  const topic = (formData.get("topic") as string) || "Psicología";
-
-  if (password !== process.env.ADMIN_PASSWORD) {
+  if (!isAdminRequest(request)) {
     return NextResponse.json({ error: "No autorizado" }, { status: 401 });
   }
 
-  const config = await getConfig();
-  config.topic = topic;
+  const body = (await request.json()) as {
+    topic?: string;
+    pdfs?: UploadedPdf[];
+    exampleImageUrl?: string | null;
+  };
 
-  // Subir PDFs
-  const pdfFiles = formData.getAll("pdfs") as File[];
-  for (const file of pdfFiles) {
-    if (file.size === 0) continue;
-    const blob = await put(`pdfs/${file.name}`, file, {
-      access: "public",
-      token: process.env.BLOB_READ_WRITE_TOKEN,
-    });
-    config.pdfs.push({ name: file.name, url: blob.url });
+  const config = await getConfig();
+  config.topic = body.topic?.trim() || "Psicología";
+
+  if (Array.isArray(body.pdfs) && body.pdfs.length > 0) {
+    config.pdfs.push(
+      ...body.pdfs.filter(
+        (pdf) =>
+          typeof pdf.name === "string" &&
+          typeof pdf.url === "string" &&
+          pdf.url.startsWith("https://")
+      )
+    );
   }
 
-  // Subir imagen de ejemplo (opcional)
-  const imageFile = formData.get("exampleImage") as File | null;
-  if (imageFile && imageFile.size > 0) {
-    const blob = await put(`images/${imageFile.name}`, imageFile, {
-      access: "public",
-      token: process.env.BLOB_READ_WRITE_TOKEN,
-    });
-    config.exampleImageUrl = blob.url;
+  if (body.exampleImageUrl && body.exampleImageUrl.startsWith("https://")) {
+    config.exampleImageUrl = body.exampleImageUrl;
   }
 
   await saveConfig(config);
 
   return NextResponse.json({
     success: true,
-    config: {
-      pdfs: config.pdfs.map((p) => p.name),
-      exampleImageUrl: config.exampleImageUrl,
-      topic: config.topic,
-    },
+    config,
   });
 }
 
 /**
- * GET /api/upload — devuelve la config actual (requiere password en query)
+ * GET /api/upload — devuelve la config actual (requiere sesión admin)
  */
 export async function GET(request: NextRequest) {
-  const password = request.nextUrl.searchParams.get("password");
-
-  if (password !== process.env.ADMIN_PASSWORD) {
+  if (!isAdminRequest(request)) {
     return NextResponse.json({ error: "No autorizado" }, { status: 401 });
   }
 

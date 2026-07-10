@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
 import {
   getConfig,
   saveQuestionsState,
@@ -7,19 +6,20 @@ import {
 } from "@/lib/store";
 import { generateQuestions } from "@/lib/gemini";
 import { extractTextsFromPdfs } from "@/lib/pdf";
+import { isAdminRequest, isValidAdminPassword } from "@/lib/admin";
 
 export const dynamic = "force-dynamic";
 
 /**
  * POST /api/generate-questions
  * Fuerza la regeneración de preguntas (uso admin o manual).
- * Protegido con ADMIN_PASSWORD.
+ * Protegido con sesión admin o ADMIN_PASSWORD.
  */
 export async function POST(request: NextRequest) {
   const body = await request.json();
   const { password } = body;
 
-  if (password !== process.env.ADMIN_PASSWORD) {
+  if (!isAdminRequest(request) && !isValidAdminPassword(password)) {
     return NextResponse.json({ error: "No autorizado" }, { status: 401 });
   }
 
