@@ -32,7 +32,13 @@ function sanitizeFilename(filename: string): string {
 }
 
 function validatePdf(file: File): string | null {
-  if (file.type !== "application/pdf") {
+  const hasPdfExtension = file.name.toLowerCase().endsWith(".pdf");
+  const hasPdfMime =
+    file.type === "application/pdf" ||
+    file.type === "application/x-pdf" ||
+    file.type === "";
+
+  if (!hasPdfExtension && !hasPdfMime) {
     return "tipo no permitido (solo PDF)";
   }
 
@@ -41,6 +47,20 @@ function validatePdf(file: File): string | null {
   }
 
   return null;
+}
+
+function getPdfContentType(file: File): string {
+  if (file.type === "application/pdf" || file.type === "application/x-pdf") {
+    return file.type;
+  }
+  return "application/pdf";
+}
+
+function getImageContentType(file: File): string {
+  if (file.type === "image/png" || file.type === "image/jpeg") {
+    return file.type;
+  }
+  return file.name.toLowerCase().endsWith(".png") ? "image/png" : "image/jpeg";
 }
 
 function validateImage(file: File): string | null {
@@ -55,8 +75,39 @@ function validateImage(file: File): string | null {
   return null;
 }
 
+function shouldRetryUpload(error: unknown): boolean {
+  if (error instanceof TypeError) {
+    const message = error.message.toLowerCase();
+    if (
+      message.includes("failed to fetch") ||
+      message.includes("networkerror") ||
+      message.includes("load failed")
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 function formatUploadError(error: unknown): string {
   if (!error) return "Error desconocido";
+
+  if (error instanceof TypeError) {
+    const message = error.message.toLowerCase();
+    if (
+      message.includes("failed to fetch") ||
+      message.includes("networkerror") ||
+      message.includes("load failed")
+    ) {
+      return [
+        "Error de red/CORS al hacer PUT a blob.vercel-storage.com.",
+        "El navegador suele mostrar esto cuando Blob rechaza el upload (400/403) sin devolver headers CORS.",
+        "Causas frecuentes: contentType no coincide, token inválido/expirado, pathname sin extensión o store mal configurado.",
+        `[TypeError: ${error.message}]`,
+      ].join(" ");
+    }
+  }
 
   if (error instanceof Error) {
     const parts: string[] = [error.message];
@@ -178,14 +229,18 @@ export default function AdminUploadForm() {
   async function uploadFileWithRetry(
     file: File,
     pathname: string,
-    clientPayload: string
+    clientPayload: string,
+    contentType: string
   ) {
     let lastError: unknown;
 
     for (let attempt = 1; attempt <= MAX_UPLOAD_ATTEMPTS; attempt++) {
       try {
         if (attempt === 1) {
-          addMessage({ type: "info", text: `Subiendo ${file.name}...` });
+          addMessage({
+            type: "info",
+            text: `Subiendo ${file.name} como ${contentType} → ${pathname}`,
+          });
         } else {
           addMessage({
             type: "info",
@@ -197,17 +252,25 @@ export default function AdminUploadForm() {
           access: "public",
           handleUploadUrl: "/api/upload/token",
           clientPayload,
+          contentType,
         });
       } catch (error) {
         lastError = error;
+        const errorText = formatUploadError(error);
 
-        if (attempt < MAX_UPLOAD_ATTEMPTS) {
+        if (attempt < MAX_UPLOAD_ATTEMPTS && shouldRetryUpload(error)) {
           addMessage({
             type: "info",
-            text: `${file.name}: falló en el intento ${attempt} — ${formatUploadError(error)}`,
+            text: `${file.name}: falló en el intento ${attempt} — ${errorText}`,
           });
           continue;
         }
+
+        addMessage({
+          type: "error",
+          text: `${file.name}: ${errorText}`,
+        });
+        break;
       }
     }
 
@@ -232,7 +295,8 @@ export default function AdminUploadForm() {
       const blob = await uploadFileWithRetry(
         file,
         `pdfs/${sanitizeFilename(file.name)}`,
-        JSON.stringify({ kind: "pdf" })
+        JSON.stringify({ kind: "pdf" }),
+        getPdfContentType(file)
       );
 
       addMessage({ type: "success", text: `${file.name}: subido correctamente.` });
@@ -271,7 +335,8 @@ export default function AdminUploadForm() {
       const blob = await uploadFileWithRetry(
         file,
         `images/${sanitizeFilename(file.name)}`,
-        JSON.stringify({ kind: "image" })
+        JSON.stringify({ kind: "image" }),
+        getImageContentType(file)
       );
 
       addMessage({

@@ -28,12 +28,20 @@ function parseClientPayload(clientPayload: string | null): UploadPayload {
  * Los archivos viajan directo del navegador a Blob; esta función solo autoriza.
  */
 export async function POST(request: NextRequest) {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    return NextResponse.json(
+      { error: "BLOB_READ_WRITE_TOKEN no está configurado en el servidor" },
+      { status: 500 }
+    );
+  }
+
   const body = (await request.json()) as HandleUploadBody;
 
   try {
     const jsonResponse = await handleUpload({
       body,
       request,
+      token: process.env.BLOB_READ_WRITE_TOKEN,
       onBeforeGenerateToken: async (pathname, clientPayload) => {
         if (!isAdminRequest(request)) {
           throw new Error("No autorizado");
