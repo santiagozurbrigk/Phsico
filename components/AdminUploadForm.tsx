@@ -9,12 +9,19 @@ type ConfigPdf = {
 };
 
 type UploadMessage = {
-  type: "success" | "error" | "info";
+  type: "success" | "error" | "info" | "summary";
   text: string;
+};
+
+type FileUploadResult = {
+  fileName: string;
+  success: boolean;
+  error?: string;
 };
 
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024;
 const MAX_FILE_SIZE_LABEL = "20MB";
+const MAX_UPLOAD_ATTEMPTS = 2; // 1 intento inicial + 1 reintento automático
 
 function sanitizeFilename(filename: string): string {
   return filename
@@ -46,6 +53,68 @@ function validateImage(file: File): string | null {
   }
 
   return null;
+}
+
+function formatUploadError(error: unknown): string {
+  if (!error) return "Error desconocido";
+
+  if (error instanceof Error) {
+    const parts: string[] = [error.message];
+
+    if (error.name && error.name !== "Error") {
+      parts.push(`[name: ${error.name}]`);
+    }
+
+    const extra = error as Error & Record<string, unknown>;
+
+    if ("code" in extra && extra.code !== undefined && extra.code !== "") {
+      parts.push(`[code: ${String(extra.code)}]`);
+    }
+
+    if ("retryAfter" in extra && extra.retryAfter !== undefined) {
+      parts.push(`[retryAfter: ${String(extra.retryAfter)}]`);
+    }
+
+    if (error.cause) {
+      parts.push(`[cause: ${formatUploadError(error.cause)}]`);
+    }
+
+    const known = new Set(["message", "name", "stack", "cause"]);
+    for (const [key, value] of Object.entries(extra)) {
+      if (!known.has(key) && value !== undefined) {
+        try {
+          parts.push(`[${key}: ${JSON.stringify(value)}]`);
+        } catch {
+          parts.push(`[${key}: ${String(value)}]`);
+        }
+      }
+    }
+
+    return parts.join(" ");
+  }
+
+  if (typeof error === "string") return error;
+
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return String(error);
+  }
+}
+
+function buildUploadSummary(results: FileUploadResult[]): string {
+  const successCount = results.filter((result) => result.success).length;
+  const failures = results.filter((result) => !result.success);
+
+  const lines = [
+    `Resumen final: ${successCount} archivo(s) subidos correctamente, ${failures.length} fallaron.`,
+  ];
+
+  for (const failure of failures) {
+    lines.push(`${failure.fileName}: ${failure.error}`);
+  }
+
+  return lines.join("\n");
 }
 
 export default function AdminUploadForm() {
@@ -106,62 +175,123 @@ export default function AdminUploadForm() {
     }
   }
 
-  async function uploadPdf(file: File): Promise<ConfigPdf | null> {
+  async function uploadFileWithRetry(
+    file: File,
+    pathname: string,
+    clientPayload: string
+  ) {
+    let lastError: unknown;
+
+    for (let attempt = 1; attempt <= MAX_UPLOAD_ATTEMPTS; attempt++) {
+      try {
+        if (attempt === 1) {
+          addMessage({ type: "info", text: `Subiendo ${file.name}...` });
+        } else {
+          addMessage({
+            type: "info",
+            text: `${file.name}: reintentando automáticamente (intento ${attempt}/${MAX_UPLOAD_ATTEMPTS})...`,
+          });
+        }
+
+        return await upload(pathname, file, {
+          access: "public",
+          handleUploadUrl: "/api/upload/token",
+          clientPayload,
+        });
+      } catch (error) {
+        lastError = error;
+
+        if (attempt < MAX_UPLOAD_ATTEMPTS) {
+          addMessage({
+            type: "info",
+            text: `${file.name}: falló en el intento ${attempt} — ${formatUploadError(error)}`,
+          });
+          continue;
+        }
+      }
+    }
+
+    throw lastError;
+  }
+
+  async function uploadPdf(file: File): Promise<{
+    uploaded: ConfigPdf | null;
+    result: FileUploadResult;
+  }> {
     const validationError = validatePdf(file);
     if (validationError) {
-      addMessage({ type: "error", text: `${file.name}: ${validationError}.` });
-      return null;
+      const errorText = validationError;
+      addMessage({ type: "error", text: `${file.name}: ${errorText}` });
+      return {
+        uploaded: null,
+        result: { fileName: file.name, success: false, error: errorText },
+      };
     }
 
     try {
-      addMessage({ type: "info", text: `Subiendo ${file.name}...` });
-      const blob = await upload(`pdfs/${sanitizeFilename(file.name)}`, file, {
-        access: "public",
-        handleUploadUrl: "/api/upload/token",
-        clientPayload: JSON.stringify({ kind: "pdf" }),
-      });
+      const blob = await uploadFileWithRetry(
+        file,
+        `pdfs/${sanitizeFilename(file.name)}`,
+        JSON.stringify({ kind: "pdf" })
+      );
 
       addMessage({ type: "success", text: `${file.name}: subido correctamente.` });
-      return { name: file.name, url: blob.url };
+      return {
+        uploaded: { name: file.name, url: blob.url },
+        result: { fileName: file.name, success: true },
+      };
     } catch (error) {
+      const errorText = formatUploadError(error);
       addMessage({
         type: "error",
-        text: `${file.name}: ${
-          error instanceof Error ? error.message : "falló la subida"
-        }.`,
+        text: `${file.name}: ${errorText}`,
       });
-      return null;
+      return {
+        uploaded: null,
+        result: { fileName: file.name, success: false, error: errorText },
+      };
     }
   }
 
-  async function uploadImage(file: File): Promise<string | null> {
+  async function uploadImage(file: File): Promise<{
+    uploaded: string | null;
+    result: FileUploadResult;
+  }> {
     const validationError = validateImage(file);
     if (validationError) {
-      addMessage({ type: "error", text: `${file.name}: ${validationError}.` });
-      return null;
+      const errorText = validationError;
+      addMessage({ type: "error", text: `${file.name}: ${errorText}` });
+      return {
+        uploaded: null,
+        result: { fileName: file.name, success: false, error: errorText },
+      };
     }
 
     try {
-      addMessage({ type: "info", text: `Subiendo imagen ${file.name}...` });
-      const blob = await upload(`images/${sanitizeFilename(file.name)}`, file, {
-        access: "public",
-        handleUploadUrl: "/api/upload/token",
-        clientPayload: JSON.stringify({ kind: "image" }),
-      });
+      const blob = await uploadFileWithRetry(
+        file,
+        `images/${sanitizeFilename(file.name)}`,
+        JSON.stringify({ kind: "image" })
+      );
 
       addMessage({
         type: "success",
         text: `${file.name}: imagen subida correctamente.`,
       });
-      return blob.url;
+      return {
+        uploaded: blob.url,
+        result: { fileName: file.name, success: true },
+      };
     } catch (error) {
+      const errorText = formatUploadError(error);
       addMessage({
         type: "error",
-        text: `${file.name}: ${
-          error instanceof Error ? error.message : "falló la subida"
-        }.`,
+        text: `${file.name}: ${errorText}`,
       });
-      return null;
+      return {
+        uploaded: null,
+        result: { fileName: file.name, success: false, error: errorText },
+      };
     }
   }
 
@@ -204,27 +334,40 @@ export default function AdminUploadForm() {
     try {
       await ensureAdminSession();
 
+      const uploadResults: FileUploadResult[] = [];
       const uploadedPdfs: ConfigPdf[] = [];
+
       for (const file of pdfFiles) {
-        const uploadedPdf = await uploadPdf(file);
-        if (uploadedPdf) uploadedPdfs.push(uploadedPdf);
+        const { uploaded, result } = await uploadPdf(file);
+        uploadResults.push(result);
+        if (uploaded) uploadedPdfs.push(uploaded);
       }
 
-      const exampleImageUrl = imageFile ? await uploadImage(imageFile) : null;
+      let exampleImageUrl: string | null = null;
+      if (imageFile) {
+        const { uploaded, result } = await uploadImage(imageFile);
+        uploadResults.push(result);
+        exampleImageUrl = uploaded;
+      }
 
-      await saveUploadedConfig(uploadedPdfs, exampleImageUrl);
+      if (uploadedPdfs.length > 0 || exampleImageUrl) {
+        await saveUploadedConfig(uploadedPdfs, exampleImageUrl);
+      }
 
-      const failedCount =
-        pdfFiles.length + (imageFile ? 1 : 0) -
-        uploadedPdfs.length -
-        (imageFile && exampleImageUrl ? 1 : 0);
+      const summary = buildUploadSummary(uploadResults);
+      addMessage({ type: "summary", text: summary });
 
-      if (failedCount > 0) {
-        setStatus(
-          `Config guardada. ${failedCount} archivo(s) no se pudieron subir; revisá el detalle.`
-        );
+      const failedCount = uploadResults.filter((result) => !result.success).length;
+      const successCount = uploadResults.filter((result) => result.success).length;
+
+      if (uploadResults.length === 0) {
+        setStatus("No seleccionaste archivos para subir.");
+      } else if (failedCount > 0) {
+        setStatus(summary);
       } else {
-        setStatus("Archivos subidos y configuración guardada correctamente.");
+        setStatus(
+          `Archivos subidos y configuración guardada correctamente. ${successCount} archivo(s) subidos.`
+        );
       }
     } catch (error) {
       setStatus(
@@ -371,8 +514,10 @@ export default function AdminUploadForm() {
 
         {status && (
           <p
-            className={`mt-4 text-sm ${
-              status.startsWith("Error") ? "text-red-600" : "text-green-600"
+            className={`mt-4 text-sm whitespace-pre-wrap break-words ${
+              status.startsWith("Error") || status.includes("fallaron")
+                ? "text-red-600"
+                : "text-green-600"
             }`}
           >
             {status}
@@ -380,17 +525,19 @@ export default function AdminUploadForm() {
         )}
 
         {messages.length > 0 && (
-          <div className="mt-4 max-h-48 overflow-y-auto rounded-lg bg-gray-50 p-3 text-sm">
+          <div className="mt-4 max-h-72 overflow-y-auto rounded-lg bg-gray-50 p-3 text-sm space-y-2">
             {messages.map((message, index) => (
               <p
                 key={`${message.type}-${index}`}
-                className={
+                className={`whitespace-pre-wrap break-words ${
                   message.type === "error"
                     ? "text-red-600"
                     : message.type === "success"
                       ? "text-green-600"
-                      : "text-gray-500"
-                }
+                      : message.type === "summary"
+                        ? "text-amber-800 font-medium border-t border-amber-200 pt-2"
+                        : "text-gray-500"
+                }`}
               >
                 {message.text}
               </p>
